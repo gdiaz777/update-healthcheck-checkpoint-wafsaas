@@ -2,7 +2,7 @@
 
 `update-healthcheck-checkpoint-wafsaas.ts` is a Deno/TypeScript helper that changes the **HTTP success code(s)** expected by the load-balancer health check of an existing Web Application asset in **Check Point CloudGuard WAF SaaS / Infinity Next**.
 
-It does **not** create assets, does **not** change upstreams, and does **not** change the LB algorithm. Those should already be configured in the portal (or by the `deploy-assets-*` script at the repo root) before running this. The script only edits `loadBalancerSetting.healthCheckSettings.successCodes`.
+It does **not** create assets, does **not** change upstreams, and does **not** change the LB algorithm. Those should already be configured in the portal before running this. The script only edits `loadBalancerSetting.healthCheckSettings.successCodes`.
 
 A typical use case: the portal wizard always seeds the health check with `200` as the only success code, but your backend answers `303` (or `301`, `302`, etc.) on a healthy probe. Without this fix all upstreams are marked unhealthy and the LB stops sending traffic to them.
 
@@ -11,22 +11,15 @@ A typical use case: the portal wizard always seeds the health check with `200` a
 ## Repository layout
 
 ```
-waf-assets-automated/
-├── .env                                                  # secrets (gitignored)
-├── deploy-assets-checkpoint-waf-saas.ts                  # creates assets from assets.yaml
-├── upload-certificate-checkpoint-wafsaas.ts              # uploads BYOC certs
-├── enforce-checkpoint-wafsaas.ts                         # standalone publish + enforce
-└── loadbalancing/
-    ├── README.md                                         # this file
-    ├── assets_upstream.har                               # portal HAR used to reverse-engineer the API
-    └── update-healthcheck-checkpoint-wafsaas.ts          # the script
+update-healthcheck-checkpoint-wafsaas/
+├── README.md                                  # this file
+├── .env                                       # secrets (gitignored, you create this)
+└── update-healthcheck-checkpoint-wafsaas.ts   # the script
 ```
 
 ---
 
 ## Dependencies
-
-Same toolchain as the rest of the repo:
 
 ```bash
 # Deno — https://docs.deno.com/runtime/getting_started/installation/
@@ -44,7 +37,7 @@ dotenvx --version
 
 ## Environment variables
 
-The script reads its credentials from the same `.env` file the other scripts in this repo use. Put the file at the **repo root** (`waf-assets-automated/.env`), not inside `loadbalancing/`, and run from the repo root so `dotenvx` finds it.
+The script reads its credentials from an `.env` file at the repo root. Create it next to `update-healthcheck-checkpoint-wafsaas.ts` and run `dotenvx` from that directory.
 
 | Variable     | Required | Description                                                                            |
 |--------------|----------|----------------------------------------------------------------------------------------|
@@ -60,7 +53,7 @@ WAFKEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 WAFSECRET=YourLongRandomAccessKeyValue
 ```
 
-> The repo root `.gitignore` already excludes `.env*` so secrets are not committed by accident.
+> Add `.env*` to your `.gitignore` so secrets are not committed by accident.
 
 ---
 
@@ -79,19 +72,19 @@ The replacement is a **full swap**: all current success codes are removed and th
 
 ## Run it
 
-From the **repo root** (`/path/to/waf-assets-automated`):
+From the directory that contains `.env` and the script:
 
 ```bash
 # 1. Dry-run first — prints the planned mutation, makes no changes
-dotenvx run -- deno run -A loadbalancing/update-healthcheck-checkpoint-wafsaas.ts \
+dotenvx run -- deno run -A update-healthcheck-checkpoint-wafsaas.ts \
     --asset my-app-prod --code 303 --dry-run
 
 # 2. Apply for real — updates the asset, publishes, and enforces the policy
-dotenvx run -- deno run -A loadbalancing/update-healthcheck-checkpoint-wafsaas.ts \
+dotenvx run -- deno run -A update-healthcheck-checkpoint-wafsaas.ts \
     --asset my-app-prod --code 303
 
 # Multiple acceptable codes
-dotenvx run -- deno run -A loadbalancing/update-healthcheck-checkpoint-wafsaas.ts \
+dotenvx run -- deno run -A update-healthcheck-checkpoint-wafsaas.ts \
     --asset my-app-prod --code 200,303
 ```
 
@@ -100,7 +93,7 @@ dotenvx run -- deno run -A loadbalancing/update-healthcheck-checkpoint-wafsaas.t
 ## What the script does, step by step
 
 1. **Login** to the Infinity Portal with `WAFKEY`/`WAFSECRET` against `WAFAUTHURL`, storing the JWT for the rest of the run.
-2. **Resolve asset id** by exact name via `getWafAssets` (filter `class:["workload"]`, the same query `deploy-assets-checkpoint-waf-saas.ts` uses).
+2. **Resolve asset id** by exact name via `getWafAssets` (filter `class:["workload"]`).
 3. **Read current state** with `getWafWebApplicationAsset` to fetch `loadBalancerSetting.healthCheckSettings.successCodes` (each entry has its own `id`).
 4. **Pre-flight checks**:
    - Aborts if the asset does not have `isLoadBalancer: true` — enable the LB first (from the portal or by extending the script).
@@ -113,7 +106,7 @@ dotenvx run -- deno run -A loadbalancing/update-healthcheck-checkpoint-wafsaas.t
      updateSuccessCodes: []
    }
    ```
-6. **Publish + enforce** with the same flow as `deploy-assets-checkpoint-waf-saas.ts`:
+6. **Publish + enforce**:
    - `asyncPublishChanges` (async — returns immediately, validation runs in the background).
    - `getUnenforcedPublishedSessions` polled for up to ~60s to give the publish a chance to settle.
    - `enforcePolicy` — always called, even if the wait above timed out (cert/asset changes can sit in a state the session query does not surface).
@@ -124,7 +117,7 @@ dotenvx run -- deno run -A loadbalancing/update-healthcheck-checkpoint-wafsaas.t
 
 ## Known caveat: input shape is inferred
 
-The captured HAR `loadbalancing/assets_upstream.har` reverse-engineers most of the API surface used in this script, **but** it does **not** contain a portal request that ever writes `successCodes` — the user that recorded the HAR kept the default `200`, so the portal never sent the field.
+The input shape used by this script was reverse-engineered from a portal HAR capture that did **not** contain a request actually writing `successCodes` (the user kept the default `200`, so the portal never sent the field).
 
 The script therefore uses the input shape that mirrors the well-captured `upstreams` triplet (`addUpstreams: [String]`, `removeUpstreams: [ID]`, `updateUpstreams: [{id, LoadBalancerUpstream}]`) and applies it to `successCodes`:
 
@@ -157,7 +150,7 @@ Once a shape is confirmed against the live API, update `updateHealthCheckCodes()
 
 ## Related API operations (for reference)
 
-The HAR confirms these as the building blocks the portal uses for the LB panel:
+The building blocks the portal uses for the LB panel:
 
 | Operation                       | Purpose                                                                                          |
 |---------------------------------|--------------------------------------------------------------------------------------------------|
@@ -168,4 +161,4 @@ The HAR confirms these as the building blocks the portal uses for the LB panel:
 | `enforcePolicy` mutation        | Pushes the published policy to the data plane. Returns an async task id.                         |
 | `getTask` query                 | Polls the status of an async task by id.                                                         |
 
-The double slash in the GraphQL URL (`/app/waf//graphql`) is intentional — that is the actual path the portal hits, mirrored from the HAR.
+The double slash in the GraphQL URL (`/app/waf//graphql`) is intentional — that is the actual path the portal hits.
